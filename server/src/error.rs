@@ -1,6 +1,9 @@
 use std::{fmt::Display, sync::mpsc::SendError};
 
-pub struct ServerError;
+pub enum ServerError{
+    AuthenticationFailed,
+    Internal
+}
 
 impl From<std::io::Error> for ServerError {
     fn from(_value: std::io::Error) -> Self {

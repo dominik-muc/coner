@@ -19,7 +19,7 @@ pub struct ThreadPool {
 impl ThreadPool {
     pub fn new(capacity: usize) -> Result<Self> {
         if capacity < 1 {
-            return Err(ServerError);
+            return Err(ServerError::Internal);
         }
 
         let (sender, receiver) = mpsc::channel();

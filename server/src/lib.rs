@@ -4,10 +4,7 @@ use common::Message;
 use error::*;
 use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod, SslStream};
 use std::{
-    io::{stdin, BufRead, BufReader, BufWriter, Write},
-    net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream},
-    sync::{mpsc::{self, Receiver, Sender}, Arc, Mutex},
-    thread::{self, JoinHandle},
+    fmt::Debug, io::{stdin, BufRead, BufReader, BufWriter, Write}, net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream}, sync::{mpsc::{self, Receiver, Sender}, Arc, Mutex, Weak}, thread::{self, JoinHandle}
 };
 use threadpool::ThreadPool;
 
@@ -88,8 +85,8 @@ fn listen(listener: TcpListener, acceptor: Arc<SslAcceptor>) -> Result<()> {
 }
 
 fn handle_connection(stream: &mut SslStream<TcpStream>, registry: Arc<Mutex<Registry>>) -> Result<()> {
-    let buffer = BufReader::new(stream);
-    let recv = BufWriter::new(stream);
+    let mut buffer = BufReader::new(stream);
+    /* let recv = BufWriter::new(stream);
     let requests = buffer.lines();
 
     let mut user_builder = UserBuilder::new();
@@ -98,27 +95,45 @@ fn handle_connection(stream: &mut SslStream<TcpStream>, registry: Arc<Mutex<Regi
     thread::spawn(move|| for update in rx{
         recv.write(update);
     });
+     */
+    let mut user_builder = UserBuilder::new();
 
-    
+    let auth_request = get_request(&mut buffer)?;
 
-    for request in requests {
-        let content = request?;
-        println!("[REQUEST] {}", content);
-        let mut args = content.split('\t');
-        let command = args.next().unwrap();
+    dbg!(&auth_request);
 
+    if let Request::CONNECT(user, pass) = auth_request{
+        println!("connected user: {}", user);
+        user_builder.set_username(user);
+        user_builder.authenticate(pass)?;
+    } else {
+        return Err(ServerError::AuthenticationFailed)
+    }
+
+    let user = Arc::new(user_builder.build());
+
+    // THIS:
+
+    registry.lock().unwrap().add_user(Arc::downgrade(&user));
+
+    /* OR THIS: (?)
+    {
+        let reg = registry.lock().unwrap();
+        reg.add_user(user);
+    }
+    */
+
+    while let Ok(request) = get_request(&mut buffer){
         let mut registry = registry.lock().unwrap();
 
-        match command {
-            "CONNECT" => {
-                    let username = args.next().unwrap();
-                    user_builder.set_username(username.to_string());
-                    user = user_builder.build();
-                    registry.add_user(user);
+        match request {
+            Request::CONNECT(user, pass) => {
+                // ALREADY CONNECTED!
             },
-            "SEND" => {
+            Request::SEND(loc, content) => {
                 let username = user.get_username();
-                registry.add_message(Message::new(username.to_string(), content.to_string()));
+                registry.add_message(Message::new(username.to_string(), content.clone()));
+                println!("got some message from {}: {}", username, content);
             }
             _ => ()
         }
@@ -127,18 +142,44 @@ fn handle_connection(stream: &mut SslStream<TcpStream>, registry: Arc<Mutex<Regi
     Ok(())
 }
 
-/* #[allow(dead_code)]
-enum Requests {
+#[allow(dead_code)]
+#[derive(Debug)]
+enum Request {
     // From client
-    CONNECT(user, password),
+    CONNECT(String, String),
     FETCH(/* channels | messages */), // -> Result(data, reason)
-    SEND(/* channel */),              // -> Result(timestamp, reason)
+    SEND(String, String),              // -> Result(timestamp, reason)
     SEARCH,
-} */
+}
+
+fn get_request<B: BufRead + Debug>(buffer: &mut B) -> Result<Request>{
+    let mut request = Vec::new();
+
+    buffer.read_until(b'\t', &mut request)?;
+
+    let mut lines = request.lines();
+
+    let header = lines.next().unwrap()?;
+    let location = lines.next().unwrap()?;
+    let mut body = String::new();
+    for line in lines{
+        let mut line = line?;
+        line.push('\n');
+        body.push_str(&line);
+    }
+
+    match header.as_str(){
+        "CONNECT" => {
+            Ok(Request::CONNECT(location, body))
+        },
+        "SEND" => Ok(Request::SEND("none".to_string(), body)),
+        _ => panic!()
+    }
+}
 
 pub struct Registry{
     received_messages: Vec<Message>,
-    connected_users: Vec<User>
+    connected_users: Vec<Weak<User>>
 }
 
 impl Registry{
@@ -151,13 +192,14 @@ impl Registry{
         self.received_messages.push(message);
     }
 
-    pub fn add_user(&mut self, user: User){
+    pub fn add_user(&mut self, user: Weak<User>){
         self.connected_users.push(user)
     }
 
     fn notify_all(&self, message: &Message){
         for user in &self.connected_users {
-            user.notify(&message);
+            // TODO: HANDLE THIS UNWRAP
+            //(*user.upgrade().unwrap()).notify(&message);
         }
     }
 }
@@ -174,6 +216,17 @@ impl UserBuilder{
     pub fn set_username(&mut self, username: String){
         self.username = Some(username)
     }
+
+    pub fn authenticate(&mut self, password: String) -> Result<()>{
+        if let None = self.username{
+            return Err(ServerError::AuthenticationFailed)
+        }
+
+        // TODO: Actual authentication.
+
+        Ok(())
+    }
+
     pub fn build(self) -> User{
         User { username: self.username.unwrap() }
     }
@@ -181,14 +234,14 @@ impl UserBuilder{
 
 pub struct User{
     username: String,
-    transmitter: Sender<Vec<u8>>
+    //transmitter: Sender<Vec<u8>>
 }
 
 impl User{
     pub fn get_username(&self) -> &str{
         &self.username
     }
-    pub fn notify(&self, message: &Message){
+    /* pub fn notify(&self, message: &Message){
         self.transmitter.send(message.as_bytes());
-    }
+    } */
 }
